@@ -27,4 +27,5 @@ B. The Environment (Graph Theory)
 Data Source: OpenStreetMap (OSM) via osmnx.
 Location: Patiala, Punjab (can be scaled to any city).
 Dynamic Weighting: instead of just distance, every edge has a safety_cost:
-Safety Cost = Length (1 + (Risk Score x Fatigue Penalty))
+
+        Safety Cost = Length (1 + (Risk Score x Fatigue Penalty))
