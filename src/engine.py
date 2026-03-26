@@ -1,76 +1,79 @@
-import os
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 import osmnx as ox
 import networkx as nx
-import tensorflow as tf
-import joblib
-import numpy as np
+import get_map
+import traceback  # Yeh humein batayega error exactly kahan hai!
 
-class NeuroNavEngine:
-    def __init__(self):
-        self.G = ox.load_graphml('data/new_york_drive.graphml')
-        self.model = tf.keras.models.load_model('data/driver_risk_model.h5')
-        self.le_road = joblib.load('data/le_road.pkl')
-        self.le_weather = joblib.load('data/le_weather.pkl')
-        self.traffic = joblib.load('data/le_traffic.pkl')
+class NeuroRoutingEngine:
+    def __init__(self, city_name):
+        self.city_name = city_name
+        print(f"Initializing Smart Engine for {city_name}...")
+        self.G = get_map.load_or_download_map(city_name)
 
-    def get_safe_route(self, source , dest , weather,traffic,hours_driven):
+    def get_coords_from_text(self, place_text):
         try:
-            w_val = self.le_weather.transform([weather])[0]
-            t_val = self.traffic.transform([traffic])[0]
+            query = f"{place_text}, Pathankot"
+            print(f"Searching for: {query}")
+            return ox.geocode(query)
         except:
-            w_val ,t_val = 0,0
+            print(f" Search failed for: {place_text}")
+            return None
 
-        # First find the route area to limit processing
+    def get_route_by_text(self, start_text, end_text):
+        start_raw = self.get_coords_from_text(start_text)
+        end_raw = self.get_coords_from_text(end_text)
+
+        # Fallback agar search fail ho (Pathankot points)
+        if not start_raw: start_raw = (32.2475, 75.6455) 
+        if not end_raw: end_raw = (32.2733, 75.6522)
+
+        # --- THE DRILL-DOWN TOOL ---
+        # Yeh chahe list ho, tuple ho ya numpy array... andar ghus kar number nikalega
+        def force_num(val, as_int=False):
+            while True:
+                if isinstance(val, (list, tuple)):
+                    val = val  # Agar list/tuple hai toh pehla element lo
+                elif hasattr(val, 'item'):
+                    val = val.item()  # Agar numpy array hai toh item() se pure number nikalo
+                else:
+                    break
+            return int(val) if as_int else float(val)
+
         try:
-            orig = ox.geocode(f"{source}, NY")
-            dest_coords = ox.geocode(f"{dest}, NY")
-            orig_node = ox.nearest_nodes(self.G, orig[1], orig[0])
-            dest_node = ox.nearest_nodes(self.G, dest_coords[1], dest_coords[0])
+            # 1. Drill-down Lat & Lng
+            lat1, lng1 = force_num(start_raw), force_num(start_raw)
+            lat2, lng2 = force_num(end_raw), force_num(end_raw)
+
+            # 2. Find Nearest Nodes
+            orig_raw = ox.distance.nearest_nodes(self.G, X=lng1, Y=lat1)
+            dest_raw = ox.distance.nearest_nodes(self.G, X=lng2, Y=lat2)
             
-            # Get subgraph around the route area (much smaller)
-            route_nodes = set(nx.shortest_path(self.G, orig_node, dest_node, weight='length'))
-            subgraph_nodes = set()
-            for node in route_nodes:
-                subgraph_nodes.update(self.G.neighbors(node))
-            subgraph_nodes.update(route_nodes)
+            # 3. Drill-down Node IDs
+            orig_node = force_num(orig_raw, as_int=True)
+            dest_node = force_num(dest_raw, as_int=True)
+
+            print(f" Start Node: {orig_node}, End Node: {dest_node}")
+
+            # 4. Dijkstra Algorithm
+            route_nodes = nx.shortest_path(self.G, orig_node, dest_node, weight='length')
             
-            # Create subgraph for processing
-            G_sub = self.G.subgraph(subgraph_nodes).copy()
+            # 5. Get GPS Coordinates for Map
+            route_coords = [[force_num(self.G.nodes[n]['x']), force_num(self.G.nodes[n]['y'])] for n in route_nodes]
             
+            print(f"Route Success! Total points: {len(route_coords)}")
+            return route_coords
+
         except Exception as e:
-            print(f"Error finding route area: {e}")
-            return {"status": "error", "message": str(e)}
+            print(f"  Routing Logic Error: {e}")
+            print("--- DETAILED ERROR LOG ---")
+            traceback.print_exc()  # Yeh ab humein exact line batayega!
+            print("--------------------------")
+            return None
 
-        # Update only edges in subgraph with risk scores
-        for u, v, k, data in G_sub.edges(data=True, keys=True):
-            rtype = data.get('highway', 'primary')
-            if isinstance(rtype, list):
-                rtype = rtype[0]
-            try:
-                r_val = self.le_road.transform([rtype])[0]
-            except:
-                r_val = 0
+if __name__ == "__main__":
+    TARGET = "Pathankot, Punjab, India"
+    engine = NeuroRoutingEngine(TARGET)
 
-            speed = float(data.get('maxspeed', 30)) if isinstance(data.get('maxspeed'), (int, float)) else 30
-            features = np.array([[r_val, speed, w_val, t_val, hours_driven]])
-            risk = self.model.predict(features ,verbose=0)[0][0]
-            fatigue_penalty = 20 if hours_driven > 8 else 5
-            
-            G_sub[u][v][k]['safety_cost'] = data['length'] * (1 + risk + fatigue_penalty)
-            G_sub[u][v][k]['risk_score'] = float(risk)
+    START_PLACE = "Pathankot Cantt"  
+    END_PLACE = "Pathankot Junction"
 
-        # Find the safest route in subgraph
-        try:
-            route = nx.shortest_path(G_sub, orig_node, dest_node, weight='safety_cost')
-            total_dist = nx.shortest_path_length(G_sub, orig_node, dest_node, weight='length')
-            avg_risk = np.mean([G_sub[u][v][0]['risk_score'] for u, v in zip(route[:-1], route[1:])])
-
-            return {
-                "Route_length": round(total_dist/1000, 2),
-                "Risk_score": round(float(avg_risk), 2),
-                "status": "success"
-            }
-        except Exception as e:
-            print(f"Error finding route: {e}")
-            return {"status": "error", "message": str(e)}
+    path = engine.get_route_by_text(START_PLACE, END_PLACE)
