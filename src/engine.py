@@ -9,7 +9,13 @@ class NeuroRoutingEngine:
         self.city_name = city_name
         print(f" Initializing Smart Engine for {city_name}...")
         self.G = get_map.load_or_download_map(city_name)
-        
+        largest_scc = max(nx.strongly_connected_components(self.G), key=len)
+        self.G = self.G.subgraph(largest_scc).copy()
+        gdf_nodes, gdf_edges = ox.graph_to_gdfs(self.G)
+        gdf_edges = get_map.compute_risk(gdf_edges)
+        for (u, v, key),rows in gdf_edges.iterrows():
+            self.G[u][v][key]['weight'] = rows['risk']
+
         self.geolocator = Nominatim(user_agent="NeuroNav_Pathankot_App")
 
         self.known_places = {
@@ -68,21 +74,18 @@ class NeuroRoutingEngine:
 
         try:
             print("\n--- Step 2: Finding Nearest Roads (Custom Fast Search) ---")
-            lat1, lng1 = force_num(start_raw), force_num(start_raw)
-            lat2, lng2 = force_num(end_raw), force_num(end_raw)
-
-            # 🚀 MILLISECOND SEARCH USING CUSTOM KD-TREE
-            _, orig_idx = self.kdtree.query((lng1, lat1))
-            _, dest_idx = self.kdtree.query((lng2, lat2))
-            
-            orig_node = self.node_ids[orig_idx]
-            dest_node = self.node_ids[dest_idx]
+            lat1, lng1 = force_num(start_raw[0]), force_num(start_raw[1])
+            lat2, lng2 = force_num(end_raw[0]), force_num(end_raw[1])
+            orig_node = ox.distance.nearest_nodes(self.G, lng1, lat1)
+            dest_node = ox.distance.nearest_nodes(self.G, lng2, lat2)
             print(f" Snapped to nearest roads instantly!")
 
             print("\n--- Step 3: Calculating Smart Path (A-Star Algorithm) ---")
-            route_nodes = nx.astar_path(self.G, orig_node, dest_node, weight='length')
+           
+            route_nodes = nx.astar_path(self.G, orig_node, dest_node, weight='weight')
             
-            route_coords = [[force_num(self.G.nodes[n]['x']), force_num(self.G.nodes[n]['y'])] for n in route_nodes]
+            route_coords = [[force_num(self.G.nodes[n]['x']), force_num(self.G.nodes[n]['y'])]
+             for n in route_nodes]
             
             print(f" Route Success! Generated {len(route_coords)} GPS points for the map.")
             return route_coords
